@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.env
+
+# Distribution / Build
+build/
+dist/
+dist_v2/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local Logs & Crash Reports
+crash_log.txt
+launch_crash.txt
+debug_hotkey_error.txt
+download_error.log
+*.log
+
+# Temporary Files
+.tmp/
+
+# ML Model Files (large binaries)
+*.bin
+*.pt
+*.pth
+*.safetensors
+*.h5
+*.onnx
+*.gguf
+*.ggml
+models/
+
+# Large Binaries / Zips
+*.zip
+freespeech_v*
+
+# Agent Context (AI assistant files — not part of the app)
+AGENT.MD
+CLAUDE.MD
+GEMINI.MD
+directives/
+
+# Test scratch files
+test_*.py
