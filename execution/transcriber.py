@@ -5,6 +5,7 @@ import sys
 import os
 import sys
 import site
+import subprocess
 
 # Force load NVIDIA DLLs for Windows
 # MUST BE DONE BEFORE IMPORTING FASTER_WHISPER / CTRANSLATE2
@@ -72,6 +73,7 @@ def check_nvidia_dlls():
         'cublas': bool,
         'cublaslt': bool,
         'cudnn': bool,
+        'vram_mb': int,
         'details': {name: path_or_error, ...}
     }
     """
@@ -81,8 +83,23 @@ def check_nvidia_dlls():
         'cublas': False,
         'cublaslt': False,
         'cudnn': False,
+        'vram_mb': 0,
         'details': {},
     }
+
+    # 0. Check VRAM via nvidia-smi
+    try:
+        creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        output = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+            creationflags=creation_flags, text=True
+        )
+        # Handle multiple GPUs by taking the first one
+        vram_mb = int(output.strip().split('\n')[0])
+        results['vram_mb'] = vram_mb
+    except Exception as e:
+        results['details']['nvidia-smi'] = str(e)
+
 
     # 1. Check ctranslate2 CUDA support
     try:

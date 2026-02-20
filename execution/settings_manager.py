@@ -13,7 +13,8 @@ class SettingsManager:
             "hotkey": "right ctrl",
             "device": "cuda",
             "compute_type": "float16",
-            "mic_index": None
+            "mic_index": None,
+            "optimal_model_selected": False
         }
         self.settings = self.load_settings()
 

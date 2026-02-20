@@ -295,8 +295,11 @@ class ModernDashboard(ctk.CTk):
         # CUDA row
         cuda_ok = results['cuda_available']
         count = results['cuda_device_count']
+        vram_mb = results.get('vram_mb', 0)
+        vram_str = f" ({vram_mb / 1024:.1f} GB)" if vram_mb > 0 else ""
+
         self._dll_labels['cuda'].configure(
-            text=f"✓  {count} device(s)" if cuda_ok else "✗  No CUDA",
+            text=f"✓  {count} device(s){vram_str}" if cuda_ok else "✗  No CUDA",
             text_color=COLORS['success'] if cuda_ok else COLORS['danger']
         )
 
@@ -340,6 +343,29 @@ class ModernDashboard(ctk.CTk):
             self.status_dot.create_oval(2, 2, 12, 12, fill=COLORS['text_sec'], outline="")
             self.status_label.configure(text="CPU MODE", text_color=COLORS['text_sec'])
             self.status_check.configure(text="—", text_color=COLORS['text_sec'])
+
+        # Auto-suggest model based on VRAM
+        if cuda_ok and vram_mb > 0 and hasattr(self, 'combo_model'):
+            if not self.settings_manager.get("optimal_model_selected"):
+                optimal_model = "large-v3"
+                if vram_mb < 2000:
+                    optimal_model = "base"
+                elif vram_mb < 3000:
+                    optimal_model = "small"
+                elif vram_mb < 6000:
+                    optimal_model = "medium"
+                
+                if hasattr(self, '_model_id_to_display'):
+                    display = self._model_id_to_display.get(optimal_model, optimal_model)
+                    self.combo_model.set(display)
+                    self._update_model_status()
+                    
+                    self.model_status_label.configure(text=f"✨ Auto-selected {optimal_model} based on your GPU", text_color=COLORS["success"])
+                    
+                    self.settings_manager.save_settings({
+                        "model_size": optimal_model,
+                        "optimal_model_selected": True
+                    })
 
     # ─── FORM SECTION ────────────────────────────────────────────────────
     def _create_form_section(self):
