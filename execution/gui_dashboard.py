@@ -1,6 +1,5 @@
 import customtkinter as ctk
 import threading
-import keyboard
 import tkinter.messagebox
 import sys
 import os
@@ -9,6 +8,7 @@ from PIL import Image
 from settings_manager import SettingsManager
 from utils import normalize_hotkey
 from transcriber import check_nvidia_dlls
+from platform_support import get_autostart, read_hotkey, IS_MAC
 import appdirs
 
 # ── Refined Palette – Harmonized with Logo ──────────────────────────────
@@ -66,6 +66,14 @@ class ModernDashboard(ctk.CTk):
         self.on_start_callback = on_start_callback
         self.settings_manager = SettingsManager()
         self._downloading = False
+
+        # Silence benign Tcl background errors from pending 'after' callbacks
+        # (e.g. customtkinter's check_dpi_scaling) that fire as the window is
+        # torn down when switching views. Harmless; just noisy in the console.
+        try:
+            self.tk.createcommand("bgerror", self._tcl_bgerror)
+        except Exception:
+            pass
 
         # ── Assets path (works in dev and frozen/PyInstaller) ──
         if getattr(__import__('sys'), 'frozen', False):
@@ -292,40 +300,47 @@ class ModernDashboard(ctk.CTk):
 
     def _apply_system_check_results(self, results):
         """Update the system checks UI with results."""
-        # CUDA row
         cuda_ok = results['cuda_available']
         count = results['cuda_device_count']
         vram_mb = results.get('vram_mb', 0)
         vram_str = f" ({vram_mb / 1024:.1f} GB)" if vram_mb > 0 else ""
 
-        self._dll_labels['cuda'].configure(
-            text=f"✓  {count} device(s){vram_str}" if cuda_ok else "✗  No CUDA",
-            text_color=COLORS['success'] if cuda_ok else COLORS['danger']
-        )
-
-        # DLL rows
-        all_ok = cuda_ok
-        for key in ('cublas', 'cublaslt', 'cudnn'):
-            found = results.get(key, False)
-            all_ok = all_ok and found
-            self._dll_labels[key].configure(
-                text="✓  Found" if found else "✗  Missing",
-                text_color=COLORS['success'] if found else COLORS['danger']
+        if results.get('is_mac'):
+            # macOS uses the MLX (Apple Silicon) backend — there are no CUDA DLLs.
+            mlx_ok = results.get('mlx_available', False)
+            self._dll_labels['cuda'].configure(
+                text=f"✓  Apple Silicon (MLX){vram_str}" if mlx_ok else "✗  MLX not installed",
+                text_color=COLORS['success'] if mlx_ok else COLORS['danger']
             )
-
-        # Summary label
-        if all_ok:
+            for key in ('cublas', 'cublaslt', 'cudnn'):
+                self._dll_labels[key].configure(text="—  n/a", text_color=COLORS['text_sec'])
+            all_ok = mlx_ok
             self.gpu_summary_label.configure(
-                text="GPU Ready ✓", text_color=COLORS['success']
-            )
-        elif cuda_ok:
-            self.gpu_summary_label.configure(
-                text="DLLs Missing ⚠", text_color="#e8a838"
+                text="MLX Ready ✓" if mlx_ok else "CPU Mode",
+                text_color=COLORS['success'] if mlx_ok else COLORS['text_sec']
             )
         else:
-            self.gpu_summary_label.configure(
-                text="CPU Mode", text_color=COLORS['text_sec']
+            # CUDA row
+            self._dll_labels['cuda'].configure(
+                text=f"✓  {count} device(s){vram_str}" if cuda_ok else "✗  No CUDA",
+                text_color=COLORS['success'] if cuda_ok else COLORS['danger']
             )
+            # DLL rows
+            all_ok = cuda_ok
+            for key in ('cublas', 'cublaslt', 'cudnn'):
+                found = results.get(key, False)
+                all_ok = all_ok and found
+                self._dll_labels[key].configure(
+                    text="✓  Found" if found else "✗  Missing",
+                    text_color=COLORS['success'] if found else COLORS['danger']
+                )
+            # Summary label
+            if all_ok:
+                self.gpu_summary_label.configure(text="GPU Ready ✓", text_color=COLORS['success'])
+            elif cuda_ok:
+                self.gpu_summary_label.configure(text="DLLs Missing ⚠", text_color="#e8a838")
+            else:
+                self.gpu_summary_label.configure(text="CPU Mode", text_color=COLORS['text_sec'])
 
         # Update the top status pill
         if all_ok:
@@ -347,7 +362,7 @@ class ModernDashboard(ctk.CTk):
         # Auto-suggest model based on VRAM
         if cuda_ok and vram_mb > 0 and hasattr(self, 'combo_model'):
             if not self.settings_manager.get("optimal_model_selected"):
-                optimal_model = "large-v3"
+                optimal_model = "large-v3-turbo"
                 if vram_mb < 2000:
                     optimal_model = "base"
                 elif vram_mb < 3000:
@@ -372,14 +387,17 @@ class ModernDashboard(ctk.CTk):
         # ── MODEL ──
         self._section_label("🧠", "MODEL")
 
-        # All sensible faster-whisper models with approximate VRAM usage
+        # All sensible faster-whisper models with approximate VRAM usage.
+        # large-v3-turbo: near large-v3 accuracy at a fraction of the compute
+        # (~6 GB VRAM, several times faster) — the recommended default.
         self.MODEL_LIST = [
-            ("tiny",         "tiny         (~1 GB VRAM)"),
-            ("base",         "base         (~1 GB VRAM)"),
-            ("small",        "small        (~2 GB VRAM)"),
-            ("medium",       "medium       (~5 GB VRAM)"),
-            ("large-v2",     "large-v2     (~10 GB VRAM)"),
-            ("large-v3",     "large-v3     (~10 GB VRAM)"),
+            ("tiny",           "tiny             (~1 GB VRAM)"),
+            ("base",           "base             (~1 GB VRAM)"),
+            ("small",          "small            (~2 GB VRAM)"),
+            ("medium",         "medium           (~5 GB VRAM)"),
+            ("large-v3-turbo", "large-v3-turbo   (~6 GB · fast ⚡)"),
+            ("large-v2",       "large-v2         (~10 GB VRAM)"),
+            ("large-v3",       "large-v3         (~10 GB VRAM)"),
         ]
         self._model_display_to_id = {display: mid for mid, display in self.MODEL_LIST}
         self._model_id_to_display = {mid: display for mid, display in self.MODEL_LIST}
@@ -476,6 +494,55 @@ class ModernDashboard(ctk.CTk):
         )
         btn_edit.pack(side="right", padx=6, pady=4)
 
+        # ── CUSTOM VOCABULARY ──
+        self._section_label("📖", "CUSTOM WORDS")
+        ctk.CTkLabel(
+            self.content_frame,
+            text="One per line. Use  misheard => correct  to fix recurring errors.",
+            font=("Segoe UI", 10), text_color=COLORS["text_sec"], anchor="w",
+            justify="left",
+        ).pack(anchor="w", pady=(2, 4))
+
+        self.txt_vocab = ctk.CTkTextbox(
+            self.content_frame,
+            height=92, fg_color=COLORS["card_bg"],
+            border_color=COLORS["border_light"], border_width=1,
+            corner_radius=10, font=("Consolas", 12),
+            text_color=COLORS["text_main"],
+        )
+        self.txt_vocab.pack(fill="x", pady=(0, 18))
+        self.txt_vocab.insert("1.0", self._vocab_settings_to_text())
+
+    def _vocab_settings_to_text(self):
+        """Render saved vocabulary + replacements back into the textbox format."""
+        lines = list(self.settings_manager.get("vocabulary") or [])
+        for wrong, right in (self.settings_manager.get("replacements") or {}).items():
+            lines.append(f"{wrong} => {right}")
+        return "\n".join(lines)
+
+    def _parse_vocab_text(self):
+        """Parse the textbox into (vocabulary list, replacements dict).
+        A line with '=>' (or '=') is a correction; anything else is a term
+        that biases recognition toward the user's preferred spelling."""
+        vocabulary, replacements = [], {}
+        raw = self.txt_vocab.get("1.0", "end") if hasattr(self, "txt_vocab") else ""
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            sep = "=>" if "=>" in line else ("=" if "=" in line else None)
+            if sep:
+                wrong, _, right = line.partition(sep)
+                wrong, right = wrong.strip(), right.strip()
+                if wrong:
+                    replacements[wrong] = right
+                    # Bias toward the corrected spelling too.
+                    if right:
+                        vocabulary.append(right)
+            else:
+                vocabulary.append(line)
+        return vocabulary, replacements
+
     # ─── FOOTER (autostart + buttons) ────────────────────────────────────
     def _create_footer(self):
         # ── Autostart row ──
@@ -559,6 +626,7 @@ class ModernDashboard(ctk.CTk):
     MODEL_SIZES_MB = {
         "tiny": 75, "base": 145, "small": 465,
         "medium": 1500, "large-v2": 3000, "large-v3": 3000,
+        "large-v3-turbo": 1620,
     }
 
     def _get_model_path(self, model_id):
@@ -656,15 +724,32 @@ class ModernDashboard(ctk.CTk):
                 except Exception:
                     pass
 
-            repo_id = f"Systran/faster-whisper-{model_id}"
             from huggingface_hub import snapshot_download
-            snapshot_download(
-                repo_id,
-                local_dir=local_dir,
-                local_dir_use_symlinks=False
-            )
+            if IS_MAC:
+                # macOS uses MLX models, cached in the shared HF cache.
+                from transcriber import MLX_REPOS
+                repo_id = MLX_REPOS.get(model_id, f"mlx-community/whisper-{model_id}")
+                snapshot_download(repo_id)
+            else:
+                # Resolve the HF repo from faster-whisper's own registry. Not every
+                # model lives under "Systran/..." (e.g. large-v3-turbo is hosted by
+                # mobiuslabsgmbh), so hard-coding the org breaks newer models.
+                try:
+                    from faster_whisper.utils import _MODELS
+                    repo_id = _MODELS.get(model_id, f"Systran/faster-whisper-{model_id}")
+                except Exception:
+                    repo_id = f"Systran/faster-whisper-{model_id}"
+                snapshot_download(
+                    repo_id,
+                    local_dir=local_dir,
+                    local_dir_use_symlinks=False
+                )
             # Verify download
-            ok, err = self._verify_model_download(local_dir)
+            if IS_MAC:
+                # MLX downloads land in the HF cache, not local_dir.
+                ok, err = (self._is_model_cached(model_id), "Model not found in cache")
+            else:
+                ok, err = self._verify_model_download(local_dir)
             self._downloading = False
             if ok:
                 self.after(0, lambda: self._on_download_done(model_id, success=True))
@@ -730,7 +815,17 @@ class ModernDashboard(ctk.CTk):
             )
 
     def _is_model_cached(self, model_id):
-        """Check if a faster-whisper model is already downloaded locally."""
+        """Check if the selected model is already downloaded locally."""
+        if IS_MAC:
+            # MLX models live in the shared Hugging Face cache, not our models dir.
+            try:
+                from transcriber import MLX_REPOS
+                from huggingface_hub import snapshot_download
+                repo = MLX_REPOS.get(model_id, f"mlx-community/whisper-{model_id}")
+                snapshot_download(repo, local_files_only=True)
+                return True
+            except Exception:
+                return False
         path = self._get_model_path(model_id)
         # Check for config.json AND model binary
         has_config = os.path.exists(os.path.join(path, "config.json"))
@@ -739,6 +834,12 @@ class ModernDashboard(ctk.CTk):
 
 
     # ─── Helpers ─────────────────────────────────────────────────────────
+    def _tcl_bgerror(self, msg):
+        if "invalid command name" in str(msg) or "application has been destroyed" in str(msg):
+            return ""
+        sys.stderr.write(f"[Tcl] {msg}\n")
+        return ""
+
     def _section_label(self, icon, text):
         lbl = ctk.CTkLabel(
             self.content_frame,
@@ -760,44 +861,29 @@ class ModernDashboard(ctk.CTk):
         self.geometry(f"+{x}+{y}")
 
     # ─── Autostart ───────────────────────────────────────────────────────
+    # Delegated to the platform layer: registry Run key on Windows, a
+    # LaunchAgent .plist on macOS. The dashboard only flips the switch.
     def check_autostart(self):
         try:
-            import winshell
-            startup = winshell.startup()
-            return os.path.exists(os.path.join(startup, "FluidText.lnk"))
-        except:
+            return get_autostart().is_enabled()
+        except Exception as e:
+            print(f"Autostart check error: {e}")
             return False
 
     def toggle_autostart(self):
         try:
-            import winshell
-            from win32com.client import Dispatch
-            startup = winshell.startup()
-            shortcut_path = os.path.join(startup, "FluidText.lnk")
-
+            mgr = get_autostart()
             if self.var_autostart.get():
-                shell = Dispatch('WScript.Shell')
-                shortcut = shell.CreateShortCut(shortcut_path)
-                exe_path = sys.executable
-
-                if getattr(sys, 'frozen', False):
-                    shortcut.Targetpath = exe_path
-                    shortcut.Arguments = "--autostart"
-                    shortcut.WorkingDirectory = os.path.dirname(exe_path)
-                    shortcut.IconLocation = exe_path
-                else:
-                    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.py")
-                    shortcut.Targetpath = exe_path
-                    shortcut.Arguments = f'"{script_path}" --autostart'
-                    shortcut.WorkingDirectory = os.path.dirname(script_path)
-
-                shortcut.Description = "FluidText Voice Dictation"
-                shortcut.save()
+                mgr.enable()
             else:
-                if os.path.exists(shortcut_path):
-                    os.remove(shortcut_path)
+                mgr.disable()
         except Exception as e:
             print(f"Autostart Error: {e}")
+            # Reflect the failure in the UI instead of leaving the switch lying.
+            try:
+                self.var_autostart.set(self.check_autostart())
+            except Exception:
+                pass
 
     # ─── Hotkey recording ────────────────────────────────────────────────
     def record_hotkey(self):
@@ -809,7 +895,7 @@ class ModernDashboard(ctk.CTk):
 
     def _wait_for_hotkey(self):
         try:
-            hotkey = keyboard.read_hotkey(suppress=False)
+            hotkey = read_hotkey()
             self.current_hotkey = normalize_hotkey(hotkey)
             self.after(0, self._update_hotkey_ui)
         except:
@@ -828,10 +914,13 @@ class ModernDashboard(ctk.CTk):
         lang_display = self.combo_lang.get()
         lang_code = LANG_DISPLAY_TO_CODE.get(lang_display, lang_display)
 
+        vocabulary, replacements = self._parse_vocab_text()
         self.settings_manager.save_settings({
             "model_size": self._get_selected_model_id(),
             "language": lang_code,
-            "hotkey": self.current_hotkey
+            "hotkey": self.current_hotkey,
+            "vocabulary": vocabulary,
+            "replacements": replacements
         })
         # Visual feedback
         orig = self.btn_save.cget("text")

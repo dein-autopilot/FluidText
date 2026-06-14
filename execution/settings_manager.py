@@ -14,7 +14,11 @@ class SettingsManager:
             "device": "cuda",
             "compute_type": "float16",
             "mic_index": None,
-            "optimal_model_selected": False
+            "optimal_model_selected": False,
+            # Custom vocabulary: list of words/names that bias recognition.
+            # Replacements: {misheard: correct} corrections applied to output.
+            "vocabulary": [],
+            "replacements": {}
         }
         self.settings = self.load_settings()
 

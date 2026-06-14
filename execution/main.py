@@ -1,7 +1,6 @@
 
 import customtkinter as ctk
 import threading
-import keyboard
 import time
 import sys
 import os
@@ -17,6 +16,19 @@ except ImportError:
 # Ensure we can find our modules
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+
+def log_path(filename):
+    """Return a writable path for crash/debug logs. The current working
+    directory is unreliable on autostart (Windows may launch us from
+    system32), so we always write into the per-user data directory."""
+    try:
+        import appdirs
+        log_dir = os.path.join(appdirs.user_data_dir("FluidText", "FluidTextAI"), "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        return os.path.join(log_dir, filename)
+    except Exception:
+        return filename
+
 from transcriber import Transcriber
 from audio_capture import AudioCapture
 from injector import TextInjector
@@ -24,6 +36,7 @@ from settings_manager import SettingsManager
 from gui_dashboard import ModernDashboard
 from gui_overlay import Overlay
 from utils import normalize_hotkey
+from platform_support import get_hotkey_monitor
 
 import pystray
 from PIL import Image, ImageDraw
@@ -84,73 +97,97 @@ class ApplicationController:
         self.app = None
         self.tray_icon = None
         self.autostart = autostart
-        
+
         # Load logic components
         self.transcriber = None
         self.audio = AudioCapture()
         self.injector = TextInjector()
-        
+
         self.is_recording = False
         self.hotkey = self.settings.get("hotkey")
-        
-        # Autostart: skip dashboard, go directly to overlay (hidden) + tray icon
-        if self.autostart:
-            self.launch_overlay()
-        else:
-            self.launch_dashboard()
+        self.hotkey_monitor = None
 
-    def launch_dashboard(self):
-        # If overlay exists, destroy it
-        if self.app:
-            try:
-                self.app.destroy()
-            except:
-                pass
-        
-        self.app = ModernDashboard(on_start_callback=self.launch_overlay)
+        # Driver loop: we switch between the dashboard and the overlay by queueing
+        # the next view and letting the current mainloop exit — never by nesting
+        # mainloops. Nesting (the old approach) made the tray "Settings"/"Restart"
+        # actions hang or fail, so you couldn't reopen the dashboard once running.
+        self._next_action = "overlay" if autostart else "dashboard"
+        self._pending_hidden = autostart
+        self._reload_model = True  # load on first overlay; reused on plain re-show
+        self.run()
+
+    def run(self):
+        while self._next_action:
+            action = self._next_action
+            self._next_action = None
+            if action == "dashboard":
+                self._run_dashboard()
+            elif action == "overlay":
+                hidden = self._pending_hidden
+                self._pending_hidden = False
+                self._run_overlay(hidden=hidden)
+
+    def _run_dashboard(self):
+        self.app = ModernDashboard(on_start_callback=self._on_dashboard_start)
         self.app.mainloop()
 
-    def launch_overlay(self, hidden=False):
+    def _on_dashboard_start(self, hidden=False):
+        # The dashboard destroys itself, then calls this. Queue the overlay; the
+        # driver loop shows it once the dashboard's mainloop has fully exited.
+        self._pending_hidden = hidden
+        self._reload_model = True  # settings (model/language/vocab) may have changed
+        self._next_action = "overlay"
+
+    def _run_overlay(self, hidden=False):
         try:
             # Reload settings just in case
             self.settings.load_settings()
-            raw_hotkey = self.settings.get("hotkey")
-            self.hotkey = normalize_hotkey(raw_hotkey)
+            self.hotkey = normalize_hotkey(self.settings.get("hotkey"))
             self._hotkey_check_counter = 0  # Counter for periodic hotkey reload
-            
+
+            # Platform hotkey monitor (Windows: keyboard, macOS: pynput listener)
+            if not self.hotkey_monitor:
+                self.hotkey_monitor = get_hotkey_monitor()
+
             model_size = self.settings.get("model_size")
-            language = self.settings.get("language")
-            self._language = language
-            
+            self._language = self.settings.get("language")
+
             # Init Overlay
             self.app = Overlay(status_callback_ref=None)
-            
-            # Autostart or hidden: hide the window, only show tray icon
-            if self.autostart or hidden:
+
+            # Hidden (autostart / minimize-to-tray): only show the tray icon
+            if hidden:
                 self.app.withdraw()
-            
+
             # Protocol handler for closing
             try:
                 self.app.protocol("WM_DELETE_WINDOW", self.quit_app)
             except:
                 pass
-                
-            # Start Model Loading
-            self.app.set_status("Loading Model...", "orange")
-            threading.Thread(target=self.init_transcriber, args=(model_size,), daemon=True).start()
-            
+
+            # Load the model only when needed — on first launch, or after the
+            # settings changed. A plain re-show from the tray reuses it (fast).
+            need_load = (self._reload_model or self.transcriber is None
+                         or self.transcriber.model is None)
+            self._reload_model = False
+            if need_load:
+                self.app.set_status("Loading Model...", "orange")
+                threading.Thread(target=self.init_transcriber, args=(model_size,), daemon=True).start()
+            else:
+                self.app.set_status("Ready", "white")
+
             print(f"[INFO] Using hotkey: {self.hotkey}")
-            
+
             # Start Visualizer Loop
             self.update_visualizer_loop()
-            
-            # Start Tray Icon
+
+            # Start Tray Icon (once; it persists across dashboard/overlay switches)
             if not self.tray_icon:
                 self.setup_tray_icon()
-            
+
             self.app.mainloop()
         except Exception as e:
-            with open("launch_crash.txt", "w") as f:
+            with open(log_path("launch_crash.txt"), "w") as f:
                 import traceback
                 f.write(traceback.format_exc())
             try:
@@ -158,28 +195,27 @@ class ApplicationController:
                 tkinter.messagebox.showerror("Launch Error", f"App crashed during launch:\n{e}\nSee launch_crash.txt")
             except:
                 pass
-            sys.exit(1)
+            self._next_action = None  # stop the driver loop on a genuine failure
 
     def setup_tray_icon(self):
         image = create_icon_image()
         menu = pystray.Menu(
             pystray.MenuItem("Show Overlay", self.show_overlay_from_tray),
             pystray.MenuItem("Settings", self.open_settings_from_tray),
-            pystray.MenuItem("Restart Overlay", self.restart_overlay_from_tray),
             pystray.MenuItem("Quit", self.quit_app)
         )
         self.tray_icon = pystray.Icon("FluidText", image, "FluidText AI", menu)
         threading.Thread(target=self.tray_icon.run, daemon=True).start()
 
     def show_overlay_from_tray(self, icon, item):
-        if self.app:
-            self.app.after(0, self.app.deiconify)
+        # Rebuild the overlay so it reliably reappears (a plain deiconify on an
+        # overrideredirect window doesn't always restore it on Windows). The
+        # loaded model is reused, so this is fast. Also recenters the overlay.
+        self._reload_model = False
+        self.request_restart = True
 
     def open_settings_from_tray(self, icon, item):
         self.request_dashboard = True
-
-    def restart_overlay_from_tray(self, icon, item):
-        self.request_restart = True
 
     def quit_app(self, icon, item):
         self.tray_icon.stop()
@@ -189,22 +225,34 @@ class ApplicationController:
 
     def init_transcriber(self, model_size):
         language = getattr(self, '_language', 'de')
-        self.transcriber = Transcriber(model_size=model_size, device="cuda", language=language)
+        vocabulary = self.settings.get("vocabulary")
+        replacements = self.settings.get("replacements")
+        self.transcriber = Transcriber(
+            model_size=model_size, device="cuda", language=language,
+            vocabulary=vocabulary, replacements=replacements,
+        )
         self.transcriber.load_model()
-        self.app.set_status("Ready", "white")
+        # The user may have switched windows while the model loaded; set_status
+        # only exists on the overlay, so guard against a stale/other window.
+        try:
+            self.app.set_status("Ready", "white")
+        except Exception:
+            pass
 
     def update_visualizer_loop(self):
-        # Check for tray requests
+        # Check for tray requests. We only queue the next view and destroy the
+        # current window; the driver loop (run) then shows it — no nested mainloop.
         if getattr(self, 'request_dashboard', False):
             self.request_dashboard = False
+            self._next_action = "dashboard"
             self.app.destroy()
-            self.launch_dashboard()
             return
 
         if getattr(self, 'request_restart', False):
             self.request_restart = False
+            self._next_action = "overlay"
+            self._pending_hidden = False
             self.app.destroy()
-            self.launch_overlay()
             return
 
         # Periodically reload hotkey from settings (every ~2 seconds = 40 iterations * 50ms)
@@ -223,11 +271,11 @@ class ApplicationController:
 
         # Check hotkey state
         try:
-            is_pressed = keyboard.is_pressed(self.hotkey)
+            is_pressed = self.hotkey_monitor.is_pressed(self.hotkey)
         except Exception as e:
             # If checking the hotkey fails, log it once (to avoid spamming IO)
             if not getattr(self, '_logged_hotkey_error', False):
-                with open("debug_hotkey_error.txt", "w") as f:
+                with open(log_path("debug_hotkey_error.txt"), "w") as f:
                     f.write(f"Error checking hotkey '{self.hotkey}': {e}")
                 self._logged_hotkey_error = True
             is_pressed = False
@@ -301,8 +349,8 @@ if __name__ == "__main__":
     except Exception as e:
         import traceback
         error_msg = traceback.format_exc()
-        # Write to a file next to the executable
-        with open("crash_log.txt", "w") as f:
+        # Write to the per-user log dir (CWD may be read-only on autostart)
+        with open(log_path("crash_log.txt"), "w") as f:
             f.write(f"Startup Crash Error:\n{error_msg}")
         print(error_msg)
         # Keep console open if possible

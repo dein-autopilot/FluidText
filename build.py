@@ -69,8 +69,10 @@ PyInstaller.__main__.run([
     '--hidden-import=pystray',
     '--hidden-import=PIL',
     '--hidden-import=PIL._tkinter_finder',
-    '--hidden-import=winshell',
-    '--hidden-import=win32com.client',
+    # Platform abstraction layer (Windows adapters; mac adapters are unused here)
+    '--hidden-import=platform_support',
+    '--hidden-import=platform_support.hotkey_windows',
+    '--hidden-import=platform_support.autostart_windows',
     '--hidden-import=sounddevice',
     '--hidden-import=certifi',
     '--hidden-import=requests',
@@ -132,6 +134,14 @@ for f in source_files:
     dst = os.path.join(target_dir, f)
     shutil.copy2(src, dst)
     print(f"  [COPY Source] {f}")
+
+# Copy the platform_support package as well (it's a subdir, not caught above)
+ps_src = os.path.join(execution_dir, "platform_support")
+if os.path.isdir(ps_src):
+    ps_dst = os.path.join(target_dir, "platform_support")
+    shutil.copytree(ps_src, ps_dst, dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    print("  [COPY Source] platform_support/")
 
 print("\n------------------------------------------------")
 print(f"Build Finished! Executable is at: {dist_dir}\\FluidText\\FluidText.exe")
