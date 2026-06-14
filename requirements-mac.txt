@@ -1,0 +1,28 @@
+# FluidText — macOS (Apple Silicon / M1–M4) dependencies
+# Use this file instead of requirements.txt on a Mac:
+#     pip install -r requirements-mac.txt
+#
+# mlx-whisper runs Whisper on the Apple Silicon GPU/Neural Engine via Apple's
+# MLX framework. It only installs on arm64 macOS (M-series), not Intel Macs.
+
+# Core (Apple Silicon transcription backend)
+mlx-whisper>=0.4.0
+numpy>=1.24.0
+sounddevice>=0.4.6
+
+# UI
+customtkinter>=5.2.0
+pystray>=0.19.0
+Pillow>=10.0.0
+appdirs>=1.4.4
+
+# System integration — global hotkey + text injection
+pynput>=1.7.6
+pyobjc-framework-Cocoa>=10.0 ; sys_platform == 'darwin'
+pyobjc-framework-Quartz>=10.0 ; sys_platform == 'darwin'
+
+# Model downloads
+huggingface_hub>=0.20.0
+certifi>=2023.7.22
+requests>=2.31.0
+tqdm>=4.65.0

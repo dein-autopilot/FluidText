@@ -1,7 +1,6 @@
 
 import customtkinter as ctk
 import threading
-import keyboard
 import time
 import sys
 import os
@@ -17,6 +16,19 @@ except ImportError:
 # Ensure we can find our modules
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+
+def log_path(filename):
+    """Return a writable path for crash/debug logs. The current working
+    directory is unreliable on autostart (Windows may launch us from
+    system32), so we always write into the per-user data directory."""
+    try:
+        import appdirs
+        log_dir = os.path.join(appdirs.user_data_dir("FluidText", "FluidTextAI"), "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        return os.path.join(log_dir, filename)
+    except Exception:
+        return filename
+
 from transcriber import Transcriber
 from audio_capture import AudioCapture
 from injector import TextInjector
@@ -24,6 +36,7 @@ from settings_manager import SettingsManager
 from gui_dashboard import ModernDashboard
 from gui_overlay import Overlay
 from utils import normalize_hotkey
+from platform_support import get_hotkey_monitor
 
 import pystray
 from PIL import Image, ImageDraw
@@ -117,6 +130,10 @@ class ApplicationController:
             raw_hotkey = self.settings.get("hotkey")
             self.hotkey = normalize_hotkey(raw_hotkey)
             self._hotkey_check_counter = 0  # Counter for periodic hotkey reload
+
+            # Platform hotkey monitor (Windows: keyboard, macOS: pynput listener)
+            if not getattr(self, 'hotkey_monitor', None):
+                self.hotkey_monitor = get_hotkey_monitor()
             
             model_size = self.settings.get("model_size")
             language = self.settings.get("language")
@@ -150,7 +167,7 @@ class ApplicationController:
             
             self.app.mainloop()
         except Exception as e:
-            with open("launch_crash.txt", "w") as f:
+            with open(log_path("launch_crash.txt"), "w") as f:
                 import traceback
                 f.write(traceback.format_exc())
             try:
@@ -189,7 +206,12 @@ class ApplicationController:
 
     def init_transcriber(self, model_size):
         language = getattr(self, '_language', 'de')
-        self.transcriber = Transcriber(model_size=model_size, device="cuda", language=language)
+        vocabulary = self.settings.get("vocabulary")
+        replacements = self.settings.get("replacements")
+        self.transcriber = Transcriber(
+            model_size=model_size, device="cuda", language=language,
+            vocabulary=vocabulary, replacements=replacements,
+        )
         self.transcriber.load_model()
         self.app.set_status("Ready", "white")
 
@@ -223,11 +245,11 @@ class ApplicationController:
 
         # Check hotkey state
         try:
-            is_pressed = keyboard.is_pressed(self.hotkey)
+            is_pressed = self.hotkey_monitor.is_pressed(self.hotkey)
         except Exception as e:
             # If checking the hotkey fails, log it once (to avoid spamming IO)
             if not getattr(self, '_logged_hotkey_error', False):
-                with open("debug_hotkey_error.txt", "w") as f:
+                with open(log_path("debug_hotkey_error.txt"), "w") as f:
                     f.write(f"Error checking hotkey '{self.hotkey}': {e}")
                 self._logged_hotkey_error = True
             is_pressed = False
@@ -301,8 +323,8 @@ if __name__ == "__main__":
     except Exception as e:
         import traceback
         error_msg = traceback.format_exc()
-        # Write to a file next to the executable
-        with open("crash_log.txt", "w") as f:
+        # Write to the per-user log dir (CWD may be read-only on autostart)
+        with open(log_path("crash_log.txt"), "w") as f:
             f.write(f"Startup Crash Error:\n{error_msg}")
         print(error_msg)
         # Keep console open if possible
