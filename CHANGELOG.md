@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.0] - 2026-06-14
 
 ### Added
 - **macOS (Apple Silicon) support**: FluidText now runs on M-series Macs. A new
@@ -22,7 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Autostart now uses the registry** (`HKCU\...\Run`) instead of a Start Menu `.lnk`. The previous approach depended on `winshell`/`pywin32` DLLs and failed silently when they were missing from the build. The new path uses only the standard library and reliably launches on boot. Legacy `.lnk` shortcuts are cleaned up automatically.
 
 ### Fixed
-- **Can't reopen the dashboard from the tray**: Switching between the overlay and the settings dashboard used nested `mainloop()` calls, which hung the tray "Settings"/"Restart Overlay" actions once the app was running. Window switching is now driven by a single top-level loop (queue next view → let the current mainloop exit), so the tray menu reliably reopens the dashboard. Benign Tcl teardown errors in the console are suppressed.
+- **Can't reopen the dashboard from the tray**: Switching between the overlay and the settings dashboard used nested `mainloop()` calls, which hung the tray actions once the app was running. Window switching is now driven by a single top-level loop (queue next view → let the current mainloop exit), so the tray menu reliably reopens the dashboard. Benign Tcl teardown errors in the console are suppressed.
+- **"Show Overlay" didn't restore the overlay**: A plain `deiconify()` doesn't reliably bring back a borderless (overrideredirect) window on Windows. "Show Overlay" now rebuilds the overlay (visible, recentered) while reusing the already-loaded model, so it's instant. The redundant "Restart Overlay" entry was merged into it, simplifying the tray menu.
 - **Model downloads for non-Systran repos**: The downloader now resolves the Hugging Face repo from faster-whisper's registry, so models like `large-v3-turbo` (hosted by `mobiuslabsgmbh`) download correctly.
 - **Crash/debug logs** are written to the per-user data directory instead of the working directory, so they're captured even when launched at boot (where the CWD may be read-only).
 

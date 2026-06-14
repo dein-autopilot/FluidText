@@ -113,6 +113,7 @@ class ApplicationController:
         # actions hang or fail, so you couldn't reopen the dashboard once running.
         self._next_action = "overlay" if autostart else "dashboard"
         self._pending_hidden = autostart
+        self._reload_model = True  # load on first overlay; reused on plain re-show
         self.run()
 
     def run(self):
@@ -134,6 +135,7 @@ class ApplicationController:
         # The dashboard destroys itself, then calls this. Queue the overlay; the
         # driver loop shows it once the dashboard's mainloop has fully exited.
         self._pending_hidden = hidden
+        self._reload_model = True  # settings (model/language/vocab) may have changed
         self._next_action = "overlay"
 
     def _run_overlay(self, hidden=False):
@@ -163,9 +165,16 @@ class ApplicationController:
             except:
                 pass
 
-            # Start Model Loading
-            self.app.set_status("Loading Model...", "orange")
-            threading.Thread(target=self.init_transcriber, args=(model_size,), daemon=True).start()
+            # Load the model only when needed — on first launch, or after the
+            # settings changed. A plain re-show from the tray reuses it (fast).
+            need_load = (self._reload_model or self.transcriber is None
+                         or self.transcriber.model is None)
+            self._reload_model = False
+            if need_load:
+                self.app.set_status("Loading Model...", "orange")
+                threading.Thread(target=self.init_transcriber, args=(model_size,), daemon=True).start()
+            else:
+                self.app.set_status("Ready", "white")
 
             print(f"[INFO] Using hotkey: {self.hotkey}")
 
@@ -193,21 +202,20 @@ class ApplicationController:
         menu = pystray.Menu(
             pystray.MenuItem("Show Overlay", self.show_overlay_from_tray),
             pystray.MenuItem("Settings", self.open_settings_from_tray),
-            pystray.MenuItem("Restart Overlay", self.restart_overlay_from_tray),
             pystray.MenuItem("Quit", self.quit_app)
         )
         self.tray_icon = pystray.Icon("FluidText", image, "FluidText AI", menu)
         threading.Thread(target=self.tray_icon.run, daemon=True).start()
 
     def show_overlay_from_tray(self, icon, item):
-        if self.app:
-            self.app.after(0, self.app.deiconify)
+        # Rebuild the overlay so it reliably reappears (a plain deiconify on an
+        # overrideredirect window doesn't always restore it on Windows). The
+        # loaded model is reused, so this is fast. Also recenters the overlay.
+        self._reload_model = False
+        self.request_restart = True
 
     def open_settings_from_tray(self, icon, item):
         self.request_dashboard = True
-
-    def restart_overlay_from_tray(self, icon, item):
-        self.request_restart = True
 
     def quit_app(self, icon, item):
         self.tray_icon.stop()
