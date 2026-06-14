@@ -48,6 +48,17 @@ class Overlay(ctk.CTk):
         self._num_bars = 15
         self._prev_heights = [0.0] * self._num_bars  # For smoothing
 
+        # Swallow benign Tcl errors from pending 'after' callbacks that fire
+        # while/after the window is being torn down (e.g. when switching to the
+        # dashboard from the tray). They are harmless but noisy in the console.
+        # These surface as Tcl *background* errors, so we override bgerror (a
+        # Python report_callback_exception does not catch them).
+        self.report_callback_exception = self._silence_teardown_errors
+        try:
+            self.tk.createcommand("bgerror", self._tcl_bgerror)
+        except Exception:
+            pass
+
         # ── Window setup ──
         self.overrideredirect(True)
         self.attributes("-topmost", True)
@@ -87,6 +98,22 @@ class Overlay(ctk.CTk):
 
         # Deferred re-center to ensure correct positioning after window is mapped
         self.after(100, self.update_geometry)
+
+    def _silence_teardown_errors(self, exc, val, tb):
+        msg = str(val)
+        if "invalid command name" in msg or "application has been destroyed" in msg:
+            return  # benign: a queued 'after' fired during teardown
+        import traceback as _tb
+        _tb.print_exception(exc, val, tb)
+
+    def _tcl_bgerror(self, msg):
+        # Tcl background error handler. Ignore the harmless teardown noise;
+        # forward anything else to stderr so real errors stay visible.
+        if "invalid command name" in str(msg) or "application has been destroyed" in str(msg):
+            return ""
+        import sys as _sys
+        _sys.stderr.write(f"[Tcl] {msg}\n")
+        return ""
 
     # ─── Pill shape ──────────────────────────────────────────────────────
     def draw_pill(self, x1, y1, x2, y2, fill, outline, width=1, tags=""):

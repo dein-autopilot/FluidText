@@ -67,6 +67,14 @@ class ModernDashboard(ctk.CTk):
         self.settings_manager = SettingsManager()
         self._downloading = False
 
+        # Silence benign Tcl background errors from pending 'after' callbacks
+        # (e.g. customtkinter's check_dpi_scaling) that fire as the window is
+        # torn down when switching views. Harmless; just noisy in the console.
+        try:
+            self.tk.createcommand("bgerror", self._tcl_bgerror)
+        except Exception:
+            pass
+
         # ── Assets path (works in dev and frozen/PyInstaller) ──
         if getattr(__import__('sys'), 'frozen', False):
             self.assets_dir = os.path.join(__import__('sys')._MEIPASS, "assets")
@@ -826,6 +834,12 @@ class ModernDashboard(ctk.CTk):
 
 
     # ─── Helpers ─────────────────────────────────────────────────────────
+    def _tcl_bgerror(self, msg):
+        if "invalid command name" in str(msg) or "application has been destroyed" in str(msg):
+            return ""
+        sys.stderr.write(f"[Tcl] {msg}\n")
+        return ""
+
     def _section_label(self, icon, text):
         lbl = ctk.CTkLabel(
             self.content_frame,

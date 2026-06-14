@@ -97,74 +97,85 @@ class ApplicationController:
         self.app = None
         self.tray_icon = None
         self.autostart = autostart
-        
+
         # Load logic components
         self.transcriber = None
         self.audio = AudioCapture()
         self.injector = TextInjector()
-        
+
         self.is_recording = False
         self.hotkey = self.settings.get("hotkey")
-        
-        # Autostart: skip dashboard, go directly to overlay (hidden) + tray icon
-        if self.autostart:
-            self.launch_overlay()
-        else:
-            self.launch_dashboard()
+        self.hotkey_monitor = None
 
-    def launch_dashboard(self):
-        # If overlay exists, destroy it
-        if self.app:
-            try:
-                self.app.destroy()
-            except:
-                pass
-        
-        self.app = ModernDashboard(on_start_callback=self.launch_overlay)
+        # Driver loop: we switch between the dashboard and the overlay by queueing
+        # the next view and letting the current mainloop exit — never by nesting
+        # mainloops. Nesting (the old approach) made the tray "Settings"/"Restart"
+        # actions hang or fail, so you couldn't reopen the dashboard once running.
+        self._next_action = "overlay" if autostart else "dashboard"
+        self._pending_hidden = autostart
+        self.run()
+
+    def run(self):
+        while self._next_action:
+            action = self._next_action
+            self._next_action = None
+            if action == "dashboard":
+                self._run_dashboard()
+            elif action == "overlay":
+                hidden = self._pending_hidden
+                self._pending_hidden = False
+                self._run_overlay(hidden=hidden)
+
+    def _run_dashboard(self):
+        self.app = ModernDashboard(on_start_callback=self._on_dashboard_start)
         self.app.mainloop()
 
-    def launch_overlay(self, hidden=False):
+    def _on_dashboard_start(self, hidden=False):
+        # The dashboard destroys itself, then calls this. Queue the overlay; the
+        # driver loop shows it once the dashboard's mainloop has fully exited.
+        self._pending_hidden = hidden
+        self._next_action = "overlay"
+
+    def _run_overlay(self, hidden=False):
         try:
             # Reload settings just in case
             self.settings.load_settings()
-            raw_hotkey = self.settings.get("hotkey")
-            self.hotkey = normalize_hotkey(raw_hotkey)
+            self.hotkey = normalize_hotkey(self.settings.get("hotkey"))
             self._hotkey_check_counter = 0  # Counter for periodic hotkey reload
 
             # Platform hotkey monitor (Windows: keyboard, macOS: pynput listener)
-            if not getattr(self, 'hotkey_monitor', None):
+            if not self.hotkey_monitor:
                 self.hotkey_monitor = get_hotkey_monitor()
-            
+
             model_size = self.settings.get("model_size")
-            language = self.settings.get("language")
-            self._language = language
-            
+            self._language = self.settings.get("language")
+
             # Init Overlay
             self.app = Overlay(status_callback_ref=None)
-            
-            # Autostart or hidden: hide the window, only show tray icon
-            if self.autostart or hidden:
+
+            # Hidden (autostart / minimize-to-tray): only show the tray icon
+            if hidden:
                 self.app.withdraw()
-            
+
             # Protocol handler for closing
             try:
                 self.app.protocol("WM_DELETE_WINDOW", self.quit_app)
             except:
                 pass
-                
+
             # Start Model Loading
             self.app.set_status("Loading Model...", "orange")
             threading.Thread(target=self.init_transcriber, args=(model_size,), daemon=True).start()
-            
+
             print(f"[INFO] Using hotkey: {self.hotkey}")
-            
+
             # Start Visualizer Loop
             self.update_visualizer_loop()
-            
-            # Start Tray Icon
+
+            # Start Tray Icon (once; it persists across dashboard/overlay switches)
             if not self.tray_icon:
                 self.setup_tray_icon()
-            
+
             self.app.mainloop()
         except Exception as e:
             with open(log_path("launch_crash.txt"), "w") as f:
@@ -175,7 +186,7 @@ class ApplicationController:
                 tkinter.messagebox.showerror("Launch Error", f"App crashed during launch:\n{e}\nSee launch_crash.txt")
             except:
                 pass
-            sys.exit(1)
+            self._next_action = None  # stop the driver loop on a genuine failure
 
     def setup_tray_icon(self):
         image = create_icon_image()
@@ -213,20 +224,27 @@ class ApplicationController:
             vocabulary=vocabulary, replacements=replacements,
         )
         self.transcriber.load_model()
-        self.app.set_status("Ready", "white")
+        # The user may have switched windows while the model loaded; set_status
+        # only exists on the overlay, so guard against a stale/other window.
+        try:
+            self.app.set_status("Ready", "white")
+        except Exception:
+            pass
 
     def update_visualizer_loop(self):
-        # Check for tray requests
+        # Check for tray requests. We only queue the next view and destroy the
+        # current window; the driver loop (run) then shows it — no nested mainloop.
         if getattr(self, 'request_dashboard', False):
             self.request_dashboard = False
+            self._next_action = "dashboard"
             self.app.destroy()
-            self.launch_dashboard()
             return
 
         if getattr(self, 'request_restart', False):
             self.request_restart = False
+            self._next_action = "overlay"
+            self._pending_hidden = False
             self.app.destroy()
-            self.launch_overlay()
             return
 
         # Periodically reload hotkey from settings (every ~2 seconds = 40 iterations * 50ms)

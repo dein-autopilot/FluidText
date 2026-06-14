@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Autostart now uses the registry** (`HKCU\...\Run`) instead of a Start Menu `.lnk`. The previous approach depended on `winshell`/`pywin32` DLLs and failed silently when they were missing from the build. The new path uses only the standard library and reliably launches on boot. Legacy `.lnk` shortcuts are cleaned up automatically.
 
 ### Fixed
+- **Can't reopen the dashboard from the tray**: Switching between the overlay and the settings dashboard used nested `mainloop()` calls, which hung the tray "Settings"/"Restart Overlay" actions once the app was running. Window switching is now driven by a single top-level loop (queue next view → let the current mainloop exit), so the tray menu reliably reopens the dashboard. Benign Tcl teardown errors in the console are suppressed.
 - **Model downloads for non-Systran repos**: The downloader now resolves the Hugging Face repo from faster-whisper's registry, so models like `large-v3-turbo` (hosted by `mobiuslabsgmbh`) download correctly.
 - **Crash/debug logs** are written to the per-user data directory instead of the working directory, so they're captured even when launched at boot (where the CWD may be read-only).
 
