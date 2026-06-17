@@ -1,5 +1,6 @@
 
 import customtkinter as ctk
+import tkinter as tk
 import math
 import random
 import os
@@ -15,10 +16,12 @@ class RECT(Structure):
     ]
 
 class Overlay(ctk.CTk):
-    def __init__(self, status_callback_ref):
+    def __init__(self, controller=None):
         super().__init__()
 
-        self.status_callback_ref = status_callback_ref
+        # The controller lets the pill's right-click menu reach app actions
+        # (open settings, quit). It may be None in standalone/dev use.
+        self.controller = controller
 
         # ── Dimensions (snug pill, minimal padding) ──
         self.IDLE_WIDTH = 96
@@ -93,11 +96,63 @@ class Overlay(ctk.CTk):
         self.update_geometry()
         self.draw_idle()
 
-        self.canvas.bind("<Button-1>", self.start_move)
-        self.canvas.bind("<B1-Motion>", self.do_move)
+        # The pill stays anchored (centered, just above the taskbar) — it is
+        # intentionally not draggable, so it can't drift and won't fight the
+        # re-centering that happens while the waveform animates.
+        # Right-click the pill for settings / hide / quit.
+        self.canvas.bind("<Button-3>", self._open_menu)
+
+        # Context menu (built once, reused).
+        self._menu = tk.Menu(self, tearoff=0)
+        self._menu.add_command(label="Einstellungen", command=self._menu_settings)
+        self._menu.add_command(label="Overlay ausblenden", command=self._menu_hide)
+        self._menu.add_separator()
+        self._menu.add_command(label="Beenden", command=self._menu_quit)
 
         # Deferred re-center to ensure correct positioning after window is mapped
         self.after(100, self.update_geometry)
+
+    # ─── Show / context menu ─────────────────────────────────────────────
+    def show_overlay(self):
+        """Reveal and recenter the pill (used after a tray-only start).
+
+        A plain deiconify on an overrideredirect window doesn't always restore
+        it on Windows, so we re-assert overrideredirect/topmost to force a clean
+        re-map, then recenter and lift."""
+        try:
+            self.deiconify()
+            self.overrideredirect(True)
+            self.attributes("-topmost", True)
+            self.attributes("-alpha", 0.95)
+            self.update_geometry()
+            self.lift()
+        except Exception:
+            pass
+
+    def _open_menu(self, event):
+        try:
+            self._menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self._menu.grab_release()
+
+    def _menu_settings(self):
+        if self.controller is not None:
+            self.controller.open_settings()
+
+    def _menu_hide(self):
+        # Unpin via the controller so it stays hidden until explicitly shown.
+        if self.controller is not None:
+            self.controller._overlay_pinned = False
+        try:
+            self.withdraw()
+        except Exception:
+            pass
+
+    def _menu_quit(self):
+        if self.controller is not None:
+            self.controller.quit_app()
+        else:
+            self.quit()
 
     def _silence_teardown_errors(self, exc, val, tb):
         msg = str(val)
@@ -134,24 +189,60 @@ class Overlay(ctk.CTk):
 
     # ─── Work area ───────────────────────────────────────────────────────
     def get_work_area(self):
+        """Primary-monitor work area (excludes the taskbar) in *physical* pixels
+        — the same coordinate space ``geometry()`` positions into on Windows."""
         try:
             rect = RECT()
             windll.user32.SystemParametersInfoW(48, 0, byref(rect), 0)
             return rect.left, rect.top, rect.right, rect.bottom
-        except:
-            return 0, 0, self.winfo_screenwidth(), self.winfo_screenheight()
+        except Exception:
+            # Physical full-screen fallback (NOT winfo_*, which is logical and
+            # would mismatch the physical geometry coordinate space).
+            try:
+                return 0, 0, windll.user32.GetSystemMetrics(0), windll.user32.GetSystemMetrics(1)
+            except Exception:
+                return 0, 0, self.winfo_screenwidth(), self.winfo_screenheight()
 
     def update_geometry(self):
         try:
-            left, top, right, bottom = self.get_work_area()
-            screen_w = right - left
-            x = left + (screen_w - self.width) // 2
-            # Use ACTIVE_HEIGHT as baseline so expanding doesn't overlap taskbar
-            y = bottom - self.ACTIVE_HEIGHT - 10 + (self.ACTIVE_HEIGHT - self.height) // 2
-            self.geometry(f"{self.width}x{self.height}+{int(x)}+{int(y)}")
+            # Anchor the pill: horizontally centered, bottom edge a few px above
+            # the taskbar — regardless of DPI scaling.
+            #
+            # Hard-won fact (verified with GetWindowRect): on Windows, Tk's
+            # `geometry()` positions windows in PHYSICAL pixels, and the Win32
+            # work area is also physical — so they line up directly with NO
+            # conversion. (winfo_screenwidth/height report *logical* pixels and
+            # must NOT be used here; mixing them in put the pill at ~3/4 height,
+            # off-centre.) CustomTkinter inflates the rendered window by the DPI
+            # factor, so the on-screen size is `size * scaling` physical px; we
+            # use that to place the bottom/centre exactly.
+            scaling = 1.0
+            try:
+                hwnd = windll.user32.GetParent(self.winfo_id())
+                dpi = windll.user32.GetDpiForWindow(hwnd)
+                if dpi:
+                    scaling = dpi / 96.0
+            except Exception:
+                pass
+            win_w = self.width * scaling
+            win_h = self.height * scaling
+
+            wl, wt, wr, wb = self.get_work_area()  # physical, taskbar-excluded
+            x = wl + ((wr - wl) - win_w) / 2
+            y = wb - win_h - 6  # snug above the taskbar
+            self.geometry(f"{self.width}x{self.height}+{int(round(x))}+{int(round(y))}")
             self.canvas.configure(width=self.width, height=self.height)
         except Exception as e:
             print(f"[ERR] Geometry: {e}")
+            # Last-resort: simple logical centering near the bottom.
+            try:
+                screen_w = self.winfo_screenwidth()
+                screen_h = self.winfo_screenheight()
+                x = (screen_w - self.width) // 2
+                y = screen_h - self.height - 48
+                self.geometry(f"{self.width}x{self.height}+{int(x)}+{int(y)}")
+            except Exception:
+                pass
 
     # ─── State switch ────────────────────────────────────────────────────
     def set_state(self, active=True):
@@ -286,18 +377,6 @@ class Overlay(ctk.CTk):
 
             x = start_x + i * (bar_w + bar_gap)
             self.canvas.coords(self._bar_ids[i], x, cy - h / 2, x, cy + h / 2)
-
-    # ─── Drag ────────────────────────────────────────────────────────────
-    def start_move(self, event):
-        self.x = event.x
-        self.y = event.y
-
-    def do_move(self, event):
-        deltax = event.x - self.x
-        deltay = event.y - self.y
-        x = self.winfo_x() + deltax
-        y = self.winfo_y() + deltay
-        self.geometry(f"+{x}+{y}")
 
     # ─── Status / Quit ───────────────────────────────────────────────────
     def set_status(self, text, color="white"):

@@ -11,6 +11,8 @@ class SettingsManager:
             "model_size": "large-v3",
             "language": "de",
             "hotkey": "right ctrl",
+            # Optional second push-to-talk hotkey. Either one triggers dictation.
+            "hotkey2": "",
             "device": "cuda",
             "compute_type": "float16",
             "mic_index": None,

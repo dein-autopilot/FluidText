@@ -96,17 +96,25 @@ class ModernDashboard(ctk.CTk):
         except:
             pass
 
-        # ── Window Config – Frameless ──
+        # ── Window Config – Frameless, modern 4:3 ──
         self.overrideredirect(True)
-        self.geometry("380x770")
+        # Target a 4:3 window (960x720), scaled down to fit smaller screens while
+        # keeping the aspect ratio. Each column scrolls if content overflows.
+        sh = self.winfo_screenheight()
+        sw = self.winfo_screenwidth()
+        win_h = min(720, max(560, sh - 140))
+        win_w = int(win_h * 4 / 3)
+        if win_w > sw - 80:               # too wide for the screen → fit to width
+            win_w = sw - 80
+            win_h = int(win_w * 3 / 4)
+        self.win_w, self.win_h = win_w, win_h
+        self.geometry(f"{win_w}x{win_h}")
         self.configure(fg_color=COLORS["bg"])
 
         # Center on screen
         self.update_idletasks()
-        sw = self.winfo_screenwidth()
-        sh = self.winfo_screenheight()
-        x = (sw - 380) // 2
-        y = (sh - 770) // 2
+        x = (sw - win_w) // 2
+        y = (sh - win_h) // 2
         self.geometry(f"+{x}+{y}")
 
         # ── Force taskbar visibility despite overrideredirect ──
@@ -149,9 +157,32 @@ class ModernDashboard(ctk.CTk):
         # ── Build UI ──
         self._create_header()
 
-        self.content_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.content_frame.pack(fill="both", expand=True, padx=22, pady=(5, 15))
+        # Footer (autostart + Save & Start + minimize) spans the full width and
+        # is always pinned to the bottom, so the main CTA is never scrolled away.
+        self.footer_bar = ctk.CTkFrame(self, fg_color="transparent")
+        self.footer_bar.pack(side="bottom", fill="x", padx=22, pady=(2, 14))
 
+        # Two columns side by side for the 4:3 layout. Each scrolls independently
+        # so nothing is clipped on smaller screens / higher DPI.
+        body = ctk.CTkFrame(self, fg_color="transparent")
+        body.pack(side="top", fill="both", expand=True, padx=10, pady=(2, 4))
+
+        self.content_frame = ctk.CTkScrollableFrame(
+            body, fg_color="transparent",
+            scrollbar_button_color=COLORS["border"],
+            scrollbar_button_hover_color=COLORS["border_light"],
+        )
+        self.content_frame.pack(side="left", fill="both", expand=True, padx=(4, 7))
+
+        self.content_right = ctk.CTkScrollableFrame(
+            body, fg_color="transparent",
+            scrollbar_button_color=COLORS["border"],
+            scrollbar_button_hover_color=COLORS["border_light"],
+        )
+        self.content_right.pack(side="left", fill="both", expand=True, padx=(7, 4))
+
+        # Left column: status + system + model + language. Right column: hotkeys
+        # + custom words (routed inside _create_form_section).
         self._create_status_section()
         self._create_system_checks_section()
         self._create_form_section()
@@ -462,55 +493,46 @@ class ModernDashboard(ctk.CTk):
         self.combo_lang.set(display)
         self.combo_lang.pack(fill="x", pady=(6, 18))
 
-        # ── HOTKEY ──
-        self._section_label("⌨", "HOTKEY")
-        self.current_hotkey = self.settings_manager.get("hotkey")
-
-        self.hotkey_frame = ctk.CTkFrame(
-            self.content_frame, fg_color=COLORS["card_bg"],
-            border_color=COLORS["border_light"], border_width=1,
-            corner_radius=10
-        )
-        self.hotkey_frame.pack(fill="x", pady=(6, 18), ipady=4)
-
-        # Hotkey text (left)
-        self.btn_hotkey = ctk.CTkButton(
-            self.hotkey_frame,
-            text=self.current_hotkey.upper().replace("+", " + "),
-            fg_color="transparent", text_color=COLORS["accent"],
-            hover_color=COLORS["border"],
-            font=("Consolas", 14, "bold"),
-            height=38, anchor="w",
-            command=self.record_hotkey
-        )
-        self.btn_hotkey.pack(side="left", fill="x", expand=True, padx=(8, 0), pady=4)
-
-        # Pencil edit icon (right)
-        btn_edit = ctk.CTkButton(
-            self.hotkey_frame, text="✏", width=36, height=36,
-            fg_color="transparent", text_color=COLORS["text_sec"],
-            hover_color=COLORS["border"], corner_radius=8,
-            font=("Segoe UI", 15), command=self.record_hotkey
-        )
-        btn_edit.pack(side="right", padx=6, pady=4)
-
-        # ── CUSTOM VOCABULARY ──
-        self._section_label("📖", "CUSTOM WORDS")
+        # ── HOTKEY (push-to-talk) ── right column
+        right = self.content_right
+        self._section_label("⌨", "HOTKEY", parent=right)
         ctk.CTkLabel(
-            self.content_frame,
+            right,
+            text="Hold to dictate. Set up to two — either one triggers it.",
+            font=("Segoe UI", 10), text_color=COLORS["text_sec"], anchor="w",
+            justify="left",
+        ).pack(anchor="w", pady=(2, 4))
+
+        self.current_hotkey = self.settings_manager.get("hotkey") or ""
+        self.current_hotkey2 = self.settings_manager.get("hotkey2") or ""
+
+        self.btn_hotkey = self._build_hotkey_row(
+            self.current_hotkey, self.record_hotkey, clear_cmd=None, parent=right
+        )
+        self.btn_hotkey2 = self._build_hotkey_row(
+            self.current_hotkey2, self.record_hotkey2,
+            clear_cmd=self.clear_hotkey2, placeholder="+  Add second hotkey", parent=right
+        )
+        # Bottom spacer to match the previous section spacing.
+        ctk.CTkFrame(right, fg_color="transparent", height=8).pack()
+
+        # ── CUSTOM VOCABULARY ── right column
+        self._section_label("📖", "CUSTOM WORDS", parent=right)
+        ctk.CTkLabel(
+            right,
             text="One per line. Use  misheard => correct  to fix recurring errors.",
             font=("Segoe UI", 10), text_color=COLORS["text_sec"], anchor="w",
             justify="left",
         ).pack(anchor="w", pady=(2, 4))
 
         self.txt_vocab = ctk.CTkTextbox(
-            self.content_frame,
-            height=92, fg_color=COLORS["card_bg"],
+            right,
+            height=180, fg_color=COLORS["card_bg"],
             border_color=COLORS["border_light"], border_width=1,
             corner_radius=10, font=("Consolas", 12),
             text_color=COLORS["text_main"],
         )
-        self.txt_vocab.pack(fill="x", pady=(0, 18))
+        self.txt_vocab.pack(fill="both", expand=True, pady=(0, 8))
         self.txt_vocab.insert("1.0", self._vocab_settings_to_text())
 
     def _vocab_settings_to_text(self):
@@ -545,8 +567,9 @@ class ModernDashboard(ctk.CTk):
 
     # ─── FOOTER (autostart + buttons) ────────────────────────────────────
     def _create_footer(self):
+        footer = self.footer_bar
         # ── Autostart row ──
-        row = ctk.CTkFrame(self.content_frame, fg_color="transparent")
+        row = ctk.CTkFrame(footer, fg_color="transparent")
         row.pack(fill="x", pady=(5, 8))
 
         text_col = ctk.CTkFrame(row, fg_color="transparent")
@@ -558,11 +581,12 @@ class ModernDashboard(ctk.CTk):
             anchor="w"
         ).pack(anchor="w")
 
-        ctk.CTkLabel(
+        self.autostart_sub = ctk.CTkLabel(
             text_col, text="Launch tool on system boot",
             font=("Segoe UI", 11), text_color=COLORS["text_sec"],
             anchor="w"
-        ).pack(anchor="w")
+        )
+        self.autostart_sub.pack(anchor="w")
 
         self.var_autostart = ctk.BooleanVar(value=self.check_autostart())
         self.switch_autostart = ctk.CTkSwitch(
@@ -577,18 +601,38 @@ class ModernDashboard(ctk.CTk):
         self.switch_autostart.pack(side="right", pady=5)
 
         # Spacer
-        ctk.CTkFrame(self.content_frame, fg_color="transparent", height=12).pack()
+        ctk.CTkFrame(footer, fg_color="transparent", height=8).pack()
 
-        # ── Save & Start – main CTA ──
+        # ── Action buttons side by side (modern wide layout) ──
+        btn_row = ctk.CTkFrame(footer, fg_color="transparent")
+        btn_row.pack(fill="x", pady=(0, 4))
+
+        # Save & Start – main CTA (takes the remaining width)
         self.btn_save = ctk.CTkButton(
-            self.content_frame, text="Save & Start  ▸",
+            btn_row, text="Save & Start  ▸",
             fg_color=COLORS["accent"], text_color="#0a0a0e",
             hover_color=COLORS["accent_hover"],
             height=54, corner_radius=14,
             font=("Segoe UI Semibold", 14, "bold"),
             command=self.launch_overlay
         )
-        self.btn_save.pack(fill="x", pady=(0, 8))
+        self.btn_save.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+        # Minimize to tray – explicit, so the ✕ isn't the only (unclear) way
+        self.btn_tray = ctk.CTkButton(
+            btn_row, text="▾  In den Tray minimieren", width=240,
+            fg_color="transparent", text_color=COLORS["text_sec"],
+            hover_color=COLORS["border"], border_color=COLORS["border_light"],
+            border_width=1, height=54, corner_radius=14,
+            font=("Segoe UI Semibold", 12, "bold"),
+            command=self.minimize_to_tray
+        )
+        self.btn_tray.pack(side="right")
+        ctk.CTkLabel(
+            footer,
+            text="Läuft im Hintergrund weiter – Diktieren bleibt aktiv.",
+            font=("Segoe UI", 9), text_color=COLORS["text_sec"]
+        ).pack(pady=(0, 2))
 
     def _get_selected_model_id(self):
         """Get the model ID from the display string."""
@@ -840,9 +884,9 @@ class ModernDashboard(ctk.CTk):
         sys.stderr.write(f"[Tcl] {msg}\n")
         return ""
 
-    def _section_label(self, icon, text):
+    def _section_label(self, icon, text, parent=None):
         lbl = ctk.CTkLabel(
-            self.content_frame,
+            parent or self.content_frame,
             text=f"{icon}  {text}",
             font=("Segoe UI Semibold", 10, "bold"),
             text_color=COLORS["text_label"]
@@ -875,17 +919,65 @@ class ModernDashboard(ctk.CTk):
             mgr = get_autostart()
             if self.var_autostart.get():
                 mgr.enable()
+                # enable() verifies the write; reaching here means it stuck.
+                self._set_autostart_sub("✓  Enabled — starts with Windows", COLORS["success"])
             else:
                 mgr.disable()
+                self._set_autostart_sub("Launch tool on system boot", COLORS["text_sec"])
         except Exception as e:
             print(f"Autostart Error: {e}")
-            # Reflect the failure in the UI instead of leaving the switch lying.
+            # Surface the failure clearly instead of silently flipping back.
             try:
                 self.var_autostart.set(self.check_autostart())
             except Exception:
                 pass
+            self._set_autostart_sub("✗  Could not enable autostart", COLORS["danger"])
+
+    def _set_autostart_sub(self, text, color):
+        try:
+            self.autostart_sub.configure(text=text, text_color=color)
+        except Exception:
+            pass
 
     # ─── Hotkey recording ────────────────────────────────────────────────
+    def _build_hotkey_row(self, current, record_cmd, clear_cmd=None, placeholder="", parent=None):
+        """Build one hotkey input row (button + edit, plus an optional clear
+        button for the optional second hotkey). Returns the main button."""
+        frame = ctk.CTkFrame(
+            parent or self.content_frame, fg_color=COLORS["card_bg"],
+            border_color=COLORS["border_light"], border_width=1, corner_radius=10
+        )
+        frame.pack(fill="x", pady=(6, 6), ipady=4)
+
+        label = current.upper().replace("+", " + ") if current else placeholder
+        btn = ctk.CTkButton(
+            frame, text=label,
+            fg_color="transparent",
+            text_color=COLORS["accent"] if current else COLORS["text_sec"],
+            hover_color=COLORS["border"], font=("Consolas", 14, "bold"),
+            height=38, anchor="w", command=record_cmd
+        )
+        btn.pack(side="left", fill="x", expand=True, padx=(8, 0), pady=4)
+
+        # Pencil edit icon (right)
+        ctk.CTkButton(
+            frame, text="✏", width=36, height=36,
+            fg_color="transparent", text_color=COLORS["text_sec"],
+            hover_color=COLORS["border"], corner_radius=8,
+            font=("Segoe UI", 15), command=record_cmd
+        ).pack(side="right", padx=6, pady=4)
+
+        # Optional clear (✕) for the optional second hotkey
+        if clear_cmd is not None:
+            ctk.CTkButton(
+                frame, text="✕", width=30, height=36,
+                fg_color="transparent", text_color=COLORS["text_sec"],
+                hover_color=COLORS["border"], corner_radius=8,
+                font=("Segoe UI", 13), command=clear_cmd
+            ).pack(side="right", padx=(0, 0), pady=4)
+
+        return btn
+
     def record_hotkey(self):
         self.btn_hotkey.configure(
             text="⏳  Listening...",
@@ -908,6 +1000,38 @@ class ModernDashboard(ctk.CTk):
             text_color=COLORS["accent"]
         )
 
+    # Second (optional) push-to-talk hotkey
+    def record_hotkey2(self):
+        self.btn_hotkey2.configure(
+            text="⏳  Listening...",
+            fg_color=COLORS["accent"], text_color="#0a0a0e"
+        )
+        self.after(200, lambda: threading.Thread(target=self._wait_for_hotkey2, daemon=True).start())
+
+    def _wait_for_hotkey2(self):
+        try:
+            hotkey = read_hotkey()
+            self.current_hotkey2 = normalize_hotkey(hotkey)
+            self.after(0, self._update_hotkey2_ui)
+        except:
+            self.after(0, self._update_hotkey2_ui)
+
+    def _update_hotkey2_ui(self):
+        if self.current_hotkey2:
+            self.btn_hotkey2.configure(
+                text=self.current_hotkey2.upper().replace("+", " + "),
+                fg_color="transparent", text_color=COLORS["accent"]
+            )
+        else:
+            self.btn_hotkey2.configure(
+                text="+  Add second hotkey",
+                fg_color="transparent", text_color=COLORS["text_sec"]
+            )
+
+    def clear_hotkey2(self):
+        self.current_hotkey2 = ""
+        self._update_hotkey2_ui()
+
     # ─── Save / Launch ───────────────────────────────────────────────────
     def save_settings(self):
         # Resolve language code from display string
@@ -919,6 +1043,7 @@ class ModernDashboard(ctk.CTk):
             "model_size": self._get_selected_model_id(),
             "language": lang_code,
             "hotkey": self.current_hotkey,
+            "hotkey2": self.current_hotkey2,
             "vocabulary": vocabulary,
             "replacements": replacements
         })

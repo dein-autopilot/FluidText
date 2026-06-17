@@ -43,20 +43,34 @@ def _remove_legacy_shortcut():
 
 
 class WindowsAutostart:
-    def is_enabled(self):
+    def _stored_command(self):
+        """Return the command currently registered in the Run key, or None."""
         try:
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_PATH) as key:
-                winreg.QueryValueEx(key, _REG_NAME)
-            return True
+                value, _ = winreg.QueryValueEx(key, _REG_NAME)
+            return value
         except FileNotFoundError:
-            return False
+            return None
+
+    def is_enabled(self):
+        return self._stored_command() is not None
 
     def enable(self):
+        """Write the Run-key value and verify the write actually took.
+
+        Returns True on success; raises on failure so the UI can surface it
+        instead of silently flipping the switch back.
+        """
         _remove_legacy_shortcut()
         command = _command()
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _REG_PATH) as key:
             winreg.SetValueEx(key, _REG_NAME, 0, winreg.REG_SZ, command)
+        # Read back to confirm — a silently-failed write is the whole bug we're
+        # fixing, so we never trust the write blindly.
+        if self._stored_command() != command:
+            raise OSError("Autostart registry write could not be verified.")
         print(f"[INFO] Autostart enabled: {command}")
+        return True
 
     def disable(self):
         _remove_legacy_shortcut()
@@ -67,3 +81,20 @@ class WindowsAutostart:
             print("[INFO] Autostart disabled.")
         except FileNotFoundError:
             pass
+
+    def refresh(self):
+        """Self-heal: if autostart is on, rewrite the command to the *current*
+        executable path. This fixes a stale entry left behind after the app
+        folder was moved/renamed (Windows would otherwise try to launch a path
+        that no longer exists). No-op when autostart is disabled."""
+        current = self._stored_command()
+        if current is None:
+            return
+        wanted = _command()
+        if current != wanted:
+            try:
+                with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _REG_PATH) as key:
+                    winreg.SetValueEx(key, _REG_NAME, 0, winreg.REG_SZ, wanted)
+                print(f"[INFO] Autostart path refreshed: {wanted}")
+            except Exception as e:
+                print(f"[WARN] Autostart refresh failed: {e}")

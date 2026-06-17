@@ -98,14 +98,38 @@ class ApplicationController:
         self.tray_icon = None
         self.autostart = autostart
 
+        # Self-heal autostart: if it's enabled, make sure the registry points at
+        # the executable's *current* location (it may have been moved/renamed).
+        try:
+            from platform_support import get_autostart
+            getattr(get_autostart(), "refresh", lambda: None)()
+        except Exception as e:
+            print(f"[WARN] Autostart refresh skipped: {e}")
+
         # Load logic components
         self.transcriber = None
         self.audio = AudioCapture()
         self.injector = TextInjector()
 
         self.is_recording = False
-        self.hotkey = self.settings.get("hotkey")
+        self.hotkey = normalize_hotkey(self.settings.get("hotkey"))
+        self.hotkey2 = normalize_hotkey(self.settings.get("hotkey2"))
         self.hotkey_monitor = None
+
+        # The overlay pill is one of the two windows the driver loop shows. We
+        # keep a dedicated reference (separate from self.app) so the background
+        # listener can update it only when it actually exists and is an Overlay.
+        self.overlay = None
+        # When "pinned" the pill stays visible while idle (normal launch / tray
+        # "Show Overlay"). When not pinned (autostart / minimize-to-tray) it only
+        # appears while you are speaking, then hides again — discreet but visible.
+        self._overlay_pinned = False
+        self._listener_running = False
+
+        # Start the global push-to-talk listener up front. Decoupling it from the
+        # GUI mainloop means dictation works no matter which window is on screen —
+        # including while the settings window is open.
+        self._start_hotkey_listener()
 
         # Driver loop: we switch between the dashboard and the overlay by queueing
         # the next view and letting the current mainloop exit — never by nesting
@@ -127,9 +151,108 @@ class ApplicationController:
                 self._pending_hidden = False
                 self._run_overlay(hidden=hidden)
 
+    # ─── Global push-to-talk listener ────────────────────────────────────
+    # Runs in its own daemon thread, independent of any GUI window, so holding
+    # the hotkey records and types text whether the overlay, the settings
+    # window, or nothing at all is currently shown.
+    def _start_hotkey_listener(self):
+        if self._listener_running:
+            return
+        if not self.hotkey_monitor:
+            self.hotkey_monitor = get_hotkey_monitor()
+        self._listener_running = True
+        threading.Thread(target=self._hotkey_loop, daemon=True).start()
+
+    def _hotkey_loop(self):
+        while self._listener_running:
+            try:
+                pressed = False
+                for hk in (self.hotkey, self.hotkey2):
+                    if hk and self.hotkey_monitor.is_pressed(hk):
+                        pressed = True
+                        break
+            except Exception as e:
+                if not getattr(self, '_logged_hotkey_error', False):
+                    try:
+                        with open(log_path("debug_hotkey_error.txt"), "w") as f:
+                            f.write(f"Error checking hotkey '{self.hotkey}'/'{self.hotkey2}': {e}")
+                    except Exception:
+                        pass
+                    self._logged_hotkey_error = True
+                pressed = False
+
+            if pressed and not self.is_recording:
+                self.start_recording()
+            elif not pressed and self.is_recording:
+                self.stop_recording_and_transcribe()
+
+            time.sleep(0.02)
+
+    # ─── Overlay UI marshaling ───────────────────────────────────────────
+    # The listener and transcription run off-thread; any overlay update must be
+    # bounced onto the Tk thread via after(). These are no-ops when the overlay
+    # isn't the current window (e.g. while the settings window is open).
+    def _ui(self, fn, delay=0):
+        ov = self.overlay
+        if not ov:
+            return
+        try:
+            ov.after(delay, lambda: self._safe_ui(ov, fn))
+        except Exception:
+            pass
+
+    def _safe_ui(self, ov, fn):
+        if ov is not self.overlay:
+            return
+        try:
+            fn(ov)
+        except Exception:
+            pass
+
+    def _set_overlay_visible(self, visible):
+        def _apply(ov):
+            if visible:
+                ov.show_overlay()
+            else:
+                ov.withdraw()
+        self._ui(_apply)
+
     def _run_dashboard(self):
+        # No overlay while the settings window owns the screen.
+        self.overlay = None
         self.app = ModernDashboard(on_start_callback=self._on_dashboard_start)
+        # Poll for a tray "Show Overlay" request so it works even from here.
+        self.app.after(150, self._dashboard_poll)
         self.app.mainloop()
+
+    def _dashboard_poll(self):
+        if getattr(self, 'request_restart', False):
+            self.request_restart = False
+            self._next_action = "overlay"
+            self._pending_hidden = False
+            try:
+                self.app.destroy()
+            except Exception:
+                pass
+            return
+
+        # Tray "Einstellungen" while the dashboard is already open: just bring it
+        # to the front (it may be minimized or behind other windows).
+        if getattr(self, 'request_dashboard_front', False):
+            self.request_dashboard_front = False
+            try:
+                self.app.deiconify()
+                self.app.lift()
+                self.app.focus_force()
+                self.app.attributes("-topmost", True)
+                self.app.after(300, lambda: self.app.attributes("-topmost", False))
+            except Exception:
+                pass
+
+        try:
+            self.app.after(150, self._dashboard_poll)
+        except Exception:
+            pass
 
     def _on_dashboard_start(self, hidden=False):
         # The dashboard destroys itself, then calls this. Queue the overlay; the
@@ -140,9 +263,10 @@ class ApplicationController:
 
     def _run_overlay(self, hidden=False):
         try:
-            # Reload settings just in case
+            # Reload settings just in case (hotkeys may have changed in settings)
             self.settings.load_settings()
             self.hotkey = normalize_hotkey(self.settings.get("hotkey"))
+            self.hotkey2 = normalize_hotkey(self.settings.get("hotkey2"))
             self._hotkey_check_counter = 0  # Counter for periodic hotkey reload
 
             # Platform hotkey monitor (Windows: keyboard, macOS: pynput listener)
@@ -152,10 +276,15 @@ class ApplicationController:
             model_size = self.settings.get("model_size")
             self._language = self.settings.get("language")
 
-            # Init Overlay
-            self.app = Overlay(status_callback_ref=None)
+            # Init Overlay (pass controller so the pill's right-click menu can
+            # open settings / quit, and so it can recenter itself on demand).
+            self.app = Overlay(controller=self)
+            self.overlay = self.app
 
-            # Hidden (autostart / minimize-to-tray): only show the tray icon
+            # Hidden (autostart / minimize-to-tray): only the tray icon for now.
+            # The pill then appears just while you speak. A normal launch or a
+            # tray "Show Overlay" pins it so it stays visible.
+            self._overlay_pinned = not hidden
             if hidden:
                 self.app.withdraw()
 
@@ -199,28 +328,47 @@ class ApplicationController:
 
     def setup_tray_icon(self):
         image = create_icon_image()
+        # "Settings" is the default action (fires on double-click / left click).
+        # The pill auto-shows while you speak, so the only thing the tray needs
+        # to offer is a reliable way back into the settings window.
         menu = pystray.Menu(
-            pystray.MenuItem("Show Overlay", self.show_overlay_from_tray),
-            pystray.MenuItem("Settings", self.open_settings_from_tray),
+            pystray.MenuItem("Settings", self.open_settings_from_tray, default=True),
+            pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", self.quit_app)
         )
         self.tray_icon = pystray.Icon("FluidText", image, "FluidText AI", menu)
         threading.Thread(target=self.tray_icon.run, daemon=True).start()
 
-    def show_overlay_from_tray(self, icon, item):
-        # Rebuild the overlay so it reliably reappears (a plain deiconify on an
-        # overrideredirect window doesn't always restore it on Windows). The
-        # loaded model is reused, so this is fast. Also recenters the overlay.
-        self._reload_model = False
-        self.request_restart = True
+    def open_settings_from_tray(self, icon=None, item=None):
+        # Runs on the pystray thread → must NOT touch Tk directly. We only raise
+        # a flag; the GUI-thread loops (which are alive — they drive the pill's
+        # waveform) tear down the current view and show the settings window.
+        if self.overlay is not None:
+            # Overlay view: the overlay tick switches to the dashboard.
+            self._reload_model = False  # reuse the loaded model — fast switch
+            self.request_dashboard = True
+        else:
+            # Already in dashboard view: bring it to the front (it may be behind
+            # other windows). Handled by the dashboard poller.
+            self.request_dashboard_front = True
 
-    def open_settings_from_tray(self, icon, item):
+    def open_settings(self):
+        # Invoked by the overlay pill's right-click menu. The overlay GUI tick
+        # picks this up, tears down the pill, and shows the settings window.
         self.request_dashboard = True
 
-    def quit_app(self, icon, item):
-        self.tray_icon.stop()
+    def quit_app(self, icon=None, item=None):
+        self._listener_running = False
+        try:
+            if self.tray_icon:
+                self.tray_icon.stop()
+        except Exception:
+            pass
         if self.app:
-            self.app.quit()
+            try:
+                self.app.quit()
+            except Exception:
+                pass
         os._exit(0)
 
     def init_transcriber(self, model_size):
@@ -240,11 +388,14 @@ class ApplicationController:
             pass
 
     def update_visualizer_loop(self):
-        # Check for tray requests. We only queue the next view and destroy the
-        # current window; the driver loop (run) then shows it — no nested mainloop.
+        # GUI-thread tick that runs while the overlay is the active window. The
+        # hotkey/recording logic now lives in the background listener; this loop
+        # only handles view switches (from the tray/pill menu) and the pill's
+        # waveform animation — both of which must run on the Tk thread.
         if getattr(self, 'request_dashboard', False):
             self.request_dashboard = False
             self._next_action = "dashboard"
+            self.overlay = None
             self.app.destroy()
             return
 
@@ -252,91 +403,76 @@ class ApplicationController:
             self.request_restart = False
             self._next_action = "overlay"
             self._pending_hidden = False
+            self.overlay = None
             self.app.destroy()
             return
 
-        # Periodically reload hotkey from settings (every ~2 seconds = 40 iterations * 50ms)
+        # Periodically reload hotkeys from settings (every ~2 seconds).
         self._hotkey_check_counter = getattr(self, '_hotkey_check_counter', 0) + 1
         if self._hotkey_check_counter >= 40:
             self._hotkey_check_counter = 0
             try:
                 self.settings.load_settings()
-                new_hotkey = normalize_hotkey(self.settings.get("hotkey"))
-                if new_hotkey and new_hotkey != self.hotkey:
-                    print(f"[INFO] Hotkey changed: {self.hotkey} -> {new_hotkey}")
-                    self.hotkey = new_hotkey
-                    self._logged_hotkey_error = False  # Reset error flag for new hotkey
-            except:
+                for attr, key in (("hotkey", "hotkey"), ("hotkey2", "hotkey2")):
+                    new_hk = normalize_hotkey(self.settings.get(key))
+                    if new_hk != getattr(self, attr):
+                        print(f"[INFO] {key} changed: {getattr(self, attr)} -> {new_hk}")
+                        setattr(self, attr, new_hk)
+                        self._logged_hotkey_error = False
+            except Exception:
                 pass
 
-        # Check hotkey state
+        # Visualizer Update (driven by the recording state the listener sets).
+        # Guarded so a transient draw error can never kill the loop — if it did,
+        # the tray "Show Overlay" / view-switch flags above would stop being
+        # serviced (which is exactly how those actions used to "do nothing").
         try:
-            is_pressed = self.hotkey_monitor.is_pressed(self.hotkey)
-        except Exception as e:
-            # If checking the hotkey fails, log it once (to avoid spamming IO)
-            if not getattr(self, '_logged_hotkey_error', False):
-                with open(log_path("debug_hotkey_error.txt"), "w") as f:
-                    f.write(f"Error checking hotkey '{self.hotkey}': {e}")
-                self._logged_hotkey_error = True
-            is_pressed = False
+            if self.is_recording and hasattr(self.audio, 'get_last_amplitude'):
+                self.app.update_visualizer(self.audio.get_last_amplitude())
+            else:
+                self.app.update_visualizer(0)
+        except Exception:
+            pass
 
-        if is_pressed:
-            if not self.is_recording:
-                self.start_recording()
-        else:
-            if self.is_recording:
-                self.stop_recording_and_transcribe()
-        
-        # Visualizer Update
-        if self.is_recording:
-            try:
-                if hasattr(self.audio, 'get_last_amplitude'):
-                    vol = self.audio.get_last_amplitude()
-                    self.app.update_visualizer(vol)
-            except:
-                pass
-        else:
-             self.app.update_visualizer(0)
-             
-        self.app.after(50, self.update_visualizer_loop)
+        try:
+            self.app.after(50, self.update_visualizer_loop)
+        except Exception:
+            pass
 
     def start_recording(self):
-        if self.transcriber and self.transcriber.model is None:
-            return # Model not ready
-            
+        # Called from the background listener thread.
+        if self.transcriber is None or self.transcriber.model is None:
+            return  # Model not loaded yet — nothing to transcribe into.
+
         self.is_recording = True
-        if self.app:
-            self.app.set_status("Listening", "#00ff00")
-            self.app.set_state(True) # Force Active State
         self.audio.start_recording()
+        # Reveal the pill (even after a tray-only autostart) and keep it up from
+        # now on — pinning here avoids flaky withdraw/deiconify churn on every
+        # dictation while still honouring a discreet, tray-only boot.
+        self._overlay_pinned = True
+        self._set_overlay_visible(True)
+        self._ui(lambda ov: ov.set_state(True))  # Force Active State
 
     def stop_recording_and_transcribe(self):
+        # Called from the background listener thread.
         self.is_recording = False
-        if self.app:
-            self.app.set_status("Transcribing", "orange")
-            self.app.set_state(False) # Force Idle State
-        
+        self._ui(lambda ov: ov.set_state(False))  # Force Idle State
+
         audio_data = self.audio.stop_recording()
-        
+
         # Threaded transcribe
         threading.Thread(target=self.process_audio, args=(audio_data,), daemon=True).start()
 
     def process_audio(self, audio_data):
-        if audio_data is None or len(audio_data) == 0:
-            if self.app:
-                self.app.after(0, lambda: self.app.set_status("Ready", "white"))
-            return
-
         try:
+            if audio_data is None or len(audio_data) == 0:
+                return
             if self.transcriber:
                 text = self.transcriber.transcribe(audio_data)
                 if text:
                     self.injector.type_text(text)
         except Exception as e:
             print(f"[ERROR] Inference: {e}")
-        
-        if self.app:
-            self.app.after(0, lambda: self.app.set_status("Ready", "white"))
 
 if __name__ == "__main__":
     try:

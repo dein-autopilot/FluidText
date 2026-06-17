@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-06-17
+
+### Added
+- **Second push-to-talk hotkey**: an optional second hotkey can be configured in the dashboard — either one triggers dictation.
+
+### Changed
+- **Redesigned dashboard**: the settings window is now a modern 4:3, two-column layout (system status / model / language on the left, hotkeys / custom words on the right) with a full-width action footer — replacing the tall, narrow single column.
+- **Simplified tray menu**: just **Settings** (also opens on a double-click of the tray icon) and **Quit**. The redundant "Show Overlay" entry was removed — the pill appears on its own while you speak.
+
+### Fixed
+- **Overlay pill placement**: the pill now sits reliably centered just above the taskbar on high-DPI / scaled displays. It is positioned in *physical* pixels (the previous logical-pixel math placed it off-center at ~3/4 screen height) and is fixed in place rather than draggable, so it no longer drifts or gets pushed away while speaking.
+- **Reopening settings from the tray**: tray actions previously called into Tk across threads and silently did nothing. They now hand off to the GUI thread via flags (the same loop that drives the pill's waveform), so "Settings" and the tray double-click reliably reopen the dashboard. The GUI loop is also hardened so a transient draw error can no longer kill it.
+- **Autostart reliability**: enabling autostart now verifies the registry write and raises on failure (instead of silently flipping the switch back), and a self-healing refresh rewrites the Run-key path if the app folder was moved or renamed.
+
 ## [1.1.0] - 2026-06-14
 
 ### Added
